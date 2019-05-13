@@ -31,6 +31,9 @@ import threading
 import pyrebase
 import time
 from flask_opencv_streamer.streamer import Streamer
+from keyClipWriter import KeyClipWriter
+import imutils
+import datetime
 
 configdb = {
     "apiKey": "AIzaSyBNZNvGzSo0BWLiy0ykfzpjKaRNKr7hTSs",
@@ -132,8 +135,9 @@ frame_rate_calc = 1
 freq = cv2.getTickFrequency()
 font = cv2.FONT_HERSHEY_SIMPLEX
 pet_detection = 0
-detectFlag = 0
-livestreamflag = 0
+kcw = KeyClipWriter(bufSize=18)
+consecFrames = 0
+pet_detection = 0
 
 def stream_handler(message):
     global detectFlag
@@ -142,21 +146,16 @@ def stream_handler(message):
         detectFlag = message["data"]
     elif message["path"] == "/livestream":
         livestreamflag = message["data"]
-        print("new livestream flag: "+str(livestreamflag))
-
-def livestream():
-    print("starting livestream...")
-    os.system('docker start cam')
-    while livestreamflag == 1:
-        time.sleep(5)
-    os.system('docker stop cam')
-    
+        print("new livestream flag: "+str(livestreamflag))   
 
 my_stream = detectStatus.stream(stream_handler)
 
 def detector():
+    
     print("Starting Pet Detection...")
+    global consecFrames
     global pet_detection
+    
 
     # Initialize Picamera and grab reference to the raw capture
     camera = PiCamera()
@@ -194,22 +193,46 @@ def detector():
                 use_normalized_coordinates=True,
                 line_thickness=8,
                 min_score_thresh=0.30)
+            if not kcw.recording:
+                consecFrames = 0
+                print("Starting clip Recording...")
+                timestamp = datetime.datetime.now()
+                p = "{}/{}.mp4".format('output',
+                        timestamp.strftime("%Y%m%d-%H%M%S"))
+                kcw.start(p, cv2.VideoWriter_fourcc(*'mp4v'),1)
             pet_detection = pet_detection + 1
-
             cv2.putText(frame,"FPS: {0:.2f}".format(frame_rate_calc),(30,50),font,1,(255,255,0),2,cv2.LINE_AA)
-        # All the results have been drawn on the frame, so it's time to display it.
 
+        # Stream frame to flask server for live stream
         streamer.update_frame(frame)
-
         if not streamer.is_streaming:
             streamer.start_streaming()
+
+        # otherwise, no action has taken place in this frame, so
+        # increment the number of consecutive frames that contain
+        # no action
+        
+        consecFrames += 1
+
+        # update the key frame clip buffer
+        kcw.update(frame)
+
+        # if we are recording and reached a threshold on consecutive
+        # number of frames with no action, stop recording the clip
+        if kcw.recording and consecFrames == 18:
+            print("saving clip..")
+            kcw.finish()
+            time.sleep(5)
+            kcw.upload()
+            
+        # All the results have been drawn on the frame, so it's time to display it.
         cv2.imshow('Object detector', frame)
 
         t2 = cv2.getTickCount()
         time1 = (t2-t1)/freq
         frame_rate_calc = 1/time1
 
-        if pet_detection > 10:
+        if pet_detection > 30:
             print("Your pet has been detected!!")
             pet_detection = 0
 
